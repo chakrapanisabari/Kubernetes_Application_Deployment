@@ -1,0 +1,107 @@
+# ASP.NET Core
+# Build and test ASP.NET Core projects targeting .NET Core.
+# Add steps that run tests, create a NuGet package, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
+# 
+# The Docker@2 task is designed to build and deploy Docker containers.
+# 'command' indicates the feature to run. In this case, buildAndPush does exactly what it sounds like.
+# 'buildContext' specifies the path to the build context.
+# 'repository' specifies the name of the repository.
+# 'dockerfile' specifies the path to the Dockerfile.
+# 'containerRegistry' specifies the name of the container registry connection to use.
+# 'tags' indicates which tags to apply to the container image.
+#
+# A publish task stores the manifests folder required for a future stage.
+# 
+# The KubernetesManifest@0 task is designed to manage all of the mainstream deployment operations required for Kubernetes.
+# 'action' indicates the feature to run. In this case, createSecret creates the shared secret. 
+# 'secretName' specifies the name of the secret to create.
+# 'dockerRegistryEndpoint' specifies the name of the Azure Container Services connection.
+# 'kubernetesServiceConnection' specifies the name of the Azure Kubernetes Services connection.
+# 'namespace' specifies the Kubernetes namespace this action applies to.
+# 'imagePullSecrets' specifies the list of secrets needed to pull from the container registry.
+# 'containers' specifies the list of container images to deploy.
+#
+
+trigger: 
+- 'master'
+
+variables:
+  buildConfiguration: 'Release'
+  leaderboardRepository: 'leaderboard'
+  webRepository: 'web'
+  tag: '$(Build.BuildId)'
+  imagePullSecret: 'secret'
+
+stages:
+- stage: 'Build'
+  displayName: 'Build and push'
+  jobs:  
+  - job: 'Build'
+    displayName: 'Build job'
+    pool:
+      vmImage: 'ubuntu-16.04'
+    steps:
+    - task: Docker@2
+      displayName: 'Build and push the image to container registry'
+      inputs:
+        command: buildAndPush
+        buildContext: $(Build.Repository.LocalPath)
+        repository: $(webRepository)
+        dockerfile: '$(Build.SourcesDirectory)/Tailspin.SpaceGame.Web/Dockerfile'
+        containerRegistry: 'registry connection'
+        tags: |
+          $(tag)
+    - task: Docker@2
+      displayName: 'Build and push the leaderboard image to container registry'
+      inputs:
+        command: buildAndPush
+        buildContext: $(Build.Repository.LocalPath)
+        repository: $(leaderboardRepository)
+        dockerfile: '$(Build.SourcesDirectory)/Tailspin.SpaceGame.LeaderboardContainer/Dockerfile'
+        containerRegistry: 'registry connection'
+        tags: |
+          $(tag)
+
+    - publish: '$(Build.SourcesDirectory)/manifests'
+      artifact: manifests
+
+- stage: 'Dev_Deploy'
+  displayName: 'Deploy the container'
+  dependsOn: Build
+  jobs:
+  - deployment: Deploy
+    displayName: 'Deploy job'
+    pool:
+      vmImage: 'ubuntu-16.04'
+    environment: 'dev.default'
+    variables:
+    - group: Release
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: current
+            artifact: manifests
+          - task: KubernetesManifest@0
+            displayName: Create imagePullSecret
+            inputs:
+              action: createSecret
+              secretName: $(imagePullSecret)
+              dockerRegistryEndpoint: 'registry connection'
+              kubernetesServiceConnection: 'cluster connection'
+              namespace: 'default'
+          - task: KubernetesManifest@0
+            displayName: Deploy to Kubernetes cluster
+            inputs:
+              action: deploy
+              kubernetesServiceConnection: 'cluster connection'
+              namespace: 'default'
+              manifests: |
+                $(Pipeline.Workspace)/manifests/deployment.yml
+                $(Pipeline.Workspace)/manifests/service.yml
+              imagePullSecrets: |
+                $(imagePullSecret)
+              containers: |
+                $(RegistryName)/$(webRepository):$(tag)
+                $(RegistryName)/$(leaderboardRepository):$(tag)
